@@ -1,0 +1,897 @@
+---
+title: "Final Project"
+author: "Rahiya Rasheed"
+date: "2023-07-24"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Imports
+```{r}
+library(bestNormalize)
+library(car)
+library(caret)
+library(cowplot)
+library(dplyr)
+library(faraway)
+library(ggcorrplot)
+library(ggplot2)
+library(glmnet)
+library(graphics)
+library(ISLR)
+library(lmtest)
+library(magrittr)
+library(MASS)
+library(Matrix)
+library(mlbench)
+library(mt)
+library(pROC)
+library(psych)
+library(purrr)
+library(ranger)
+library(readr)
+library(reshape2)
+library(stats)
+library(tidyr)
+library(tidyverse)
+library(tree)
+```
+
+# Import Data
+
+```{r}
+data = read.csv("C:\\Users\\rahiy\\OneDrive\\Documents\\homework 1\\forestfires.csv")
+```
+
+# Preliminary Data Cleaning
+
+```{r}
+names(data)
+which(is.na(data))
+```
+
+There is no missing data.
+
+   1. X - x-axis spatial coordinate within the Montesinho park map: 1 to 9
+   2. Y - y-axis spatial coordinate within the Montesinho park map: 2 to 9
+   3. month - month of the year: 'jan' to 'dec' 
+   4. day - day of the week: 'mon' to 'sun'
+   5. FFMC - FFMC index from the FWI system: 18.7 to 96.20
+   6. DMC - DMC index from the FWI system: 1.1 to 291.3 
+   7. DC - DC index from the FWI system: 7.9 to 860.6 
+   8. ISI - ISI index from the FWI system: 0.0 to 56.10
+   9. temp - temperature in Celsius degrees: 2.2 to 33.30
+   10. RH - relative humidity in %: 15.0 to 100
+   11. wind - wind speed in km/h: 0.40 to 9.40 
+   12. rain - outside rain in mm/m2 : 0.0 to 6.4 
+   13. area - the burned area of the forest (in ha): 0.00 to 1090.84 
+   (this output variable is very skewed towards 0.0, thus it may make
+    sense to model with the logarithm transform).
+
+We convert the categorical columns to the `factor` type.
+
+```{r}
+factor_variables <- c("X", "Y", "month", "day")
+for (factor_variable in factor_variables) {
+  data[, factor_variable] = as.factor(data[, factor_variable])
+}
+```
+
+# Data Visualization
+
+```{r}
+coord_counts <- merge(as.data.frame(table(data[, 1:2])), expand.grid(X=as.factor(c(1:9)), Y=as.factor(c(1:9))), by=c("X", "Y"), all=TRUE)
+
+ggplot() +
+  geom_raster(data=coord_counts, aes(x=X, y=Y, fill=Freq)) +
+  scale_fill_gradient(low="white", high="brown3", na.value = "white", name="Count") +
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits=factor(9:1)) +
+  ggtitle("Frequency of fires in each zone") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+# TODO - unnecessary
+# plotdata = subset(data)
+pairs(data)
+```
+
+Looking at the forest fires are distributed over the year
+
+```{r}
+data %>% 
+  ggplot(aes(x = month)) +
+  geom_bar() +
+  labs(y = "Frequency of fires", x = "month")
+```
+
+```{r}
+data %>% 
+  ggplot(aes(x =day)) +
+  geom_bar() +
+  labs(y = "Frequency of fires", x = "day")
+```
+
+```{r}
+## write the function 
+create_scatterplots = function(x, y) {
+  ggplot(data = data) + 
+    aes_string(x = x, y = y) +
+    geom_point() +
+    theme(panel.background = element_rect(fill = "white"))
+}
+
+## Assign x and y variable names 
+x_var_scatter <- names(data)[5:12]
+y_var_scatter <- names(data)[13]
+
+## use the map() function to apply the function to the variables of interest
+scatters <- map2(x_var_scatter, y_var_scatter, create_scatterplots)
+
+scatters
+```
+There is no indication of linearity
+
+Lets look at the how the data is balanced between small and large fires
+
+```{r}
+data$ISI = log(data$ISI)
+```
+
+
+```{r}
+cm <- cor(data[, c(5,6,7,8,9,10,11,13)])
+ggcorrplot(cm, type="lower", lab=TRUE)
+```
+
+Histograms of every variable with its transformation
+
+```{r}
+data$DC = (data$DC)^1/3
+data$RH = log(data$RH)
+data$wind = sqrt(data$wind)
+```
+
+```{r}
+otherarea = log(data$area + 1)
+
+size = ifelse(data$area >= 10, 1, 0)
+data = cbind(data, size)
+hist(data$size)
+bestNormalize(data$area)
+
+transarea = orderNorm(data$area)
+hist(sqrt(transarea$x.t))
+area = sqrt(transarea$x.t)
+
+bestNormalize(data$FFMC)
+```
+
+
+```{r}
+transFFMC = orderNorm(data$FFMC)
+hist((transFFMC$x.t))
+MLRFFMC = transFFMC$x.t
+# data[, "otherarea"] <- otherarea
+# data[, "MLRFFMC"] <- MLRFFMC
+
+# Define column name masks for MLR and PCR DataFrames
+# mlr_colnames_mask = !(colnames(data) %in% c("FFMC", "otherarea"))
+# pcr_colnames_mask = !(colnames(data) %in% c("MLRFFMC", "area"))
+
+# Store MLR and PCR data in separate variables
+data_mlr <- data
+data_pcr <- data
+
+# Apply different transformations to FFMC for the two models
+data_mlr$FFMC <- orderNorm(data$FFMC)$x.t
+data_pcr$FFMC <- data$FFMC
+
+# Apply different transformations to area for the two models
+mlr_area_transform_obj <- orderNorm(data$area)
+data_mlr$area <- sqrt(mlr_area_transform_obj$x.t)
+data_pcr$area <- log(1.0 + data$area)
+
+# Define functions to invert the transforms applied to area
+inverse_transform_mlr_area <- function(output) {
+  sq <- output ^ 2
+  sq[output < 0] = -sq[output < 0]
+  return(predict(mlr_area_transform_obj, newdata = sq, inverse = TRUE))
+}
+inverse_transform_pcr_area <- function(output) {
+  return(exp(output) - 1.0)
+}
+
+# Maintain copies of original area separately for testing
+data_mlr_area_untransformed <- data$area
+data_pcr_area_untransformed <- data$area
+
+# Remove NA values
+non_na_data_mlr <- complete.cases(data_mlr)
+non_na_data_pcr <- complete.cases(data_pcr)
+data_mlr <- data_mlr[non_na_data_mlr, ]
+data_pcr <- data_pcr[non_na_data_pcr, ]
+data_mlr_area_untransformed <- data_mlr_area_untransformed[non_na_data_mlr]
+data_pcr_area_untransformed <- data_pcr_area_untransformed[non_na_data_pcr]
+
+# Remove inf values
+finite_data_mlr <- unname(is.finite(rowSums(data_mlr[, !(colnames(data_mlr) %in% factor_variables)])))
+finite_data_pcr <- unname(is.finite(rowSums(data_pcr[, !(colnames(data_pcr) %in% factor_variables)])))
+data_mlr <- data_mlr[finite_data_mlr, ]
+data_pcr <- data_pcr[finite_data_pcr, ]
+data_mlr_area_untransformed <- data_mlr_area_untransformed[finite_data_mlr]
+data_pcr_area_untransformed <- data_pcr_area_untransformed[finite_data_pcr]
+```
+
+TODO: histograms of all columns for each dataset
+
+# Modeling
+
+## Multiple Linear Regression
+
+### Construct Model on Full Dataset
+
+```{r}
+model_mlr = lm(area ~ ., data = data_mlr)
+```
+
+### Model Statistics
+
+```{r}
+# Get model summary
+summary(model_mlr)
+
+# RMSE of model on training set
+mlr_resids_transformed <- model_mlr$residuals
+rmse_mlr_transformed <- sqrt(mean(mlr_resids_transformed^2))
+cat("RMSE (transformed):", rmse_mlr_transformed, "\n")
+
+# RMSE of model on training set after back-transforming residuals
+mlr_resids_untransformed <- inverse_transform_mlr_area(model_mlr$residuals)
+rmse_mlr_untransformed <- sqrt(mean(mlr_resids_untransformed^2))
+cat("RMSE (untransformed):", rmse_mlr_untransformed, "\n")
+```
+
+```{r}
+plot(model_mlr)
+```
+
+This is not a great model - let us look at any unusual points in the data, and re-fit the model after removing these points.
+
+```{r}
+to_remove <- c()
+```
+
+
+### Leverage Points
+
+```{r}
+n = 517; p = 13;
+lev = influence(model_mlr)$hat
+HighLeverage = lev[lev>0.3]
+leverage_points <- as.numeric(rownames(data.frame(HighLeverage)))
+leverage_points
+
+to_remove <- append(to_remove, leverage_points)
+```
+
+```{r}
+halfnorm(lev, 4, labs = row.names(data), ylab = "Leverages")
+```
+### Outliers
+
+```{r}
+jack = rstudent(model_mlr);
+qt(0.05/(2*n), 256)
+outliers = which(abs(jack) > abs(qt(0.05/(2*n), 256)))
+sort(abs(jack), decreasing = TRUE)[1:5]
+halfnorm(jack, labs = row.names(data), ylab = "Cook's Distance")
+
+to_remove <- append(to_remove, outliers)
+```
+### Influential Observations
+
+```{r}
+cook = cooks.distance(model_mlr)
+cook[which.max(cook)]
+halfnorm(cook, labs = row.names(data), ylab = "Cook's Distance")
+```
+
+### Remove Influential/Outlier/HighLeverage Points
+
+```{r}
+data_mlr_clean <- data_mlr[-to_remove, ]
+data_mlr_clean_area_untransformed <- data_mlr_area_untransformed[-to_remove]
+
+# Re-level factor columns to ensure that levels correspond to actual values
+for (col in factor_variables) {
+  data_mlr_clean[, col] <- droplevels(data_mlr_clean[, col])
+}
+```
+
+### Train/Test Split
+
+```{r}
+test_sample_mlr <- sample(1:nrow(data_mlr_clean), floor(0.2 * nrow(data_mlr_clean)))
+
+# Ensure all levels for factor variables exist in training set 
+to_add <- c()
+for (col in factor_variables) {
+  train_col_values_mlr <- unique(data_mlr_clean[-test_sample_mlr, col])
+  for (level in levels(data_mlr_clean[, col])) {
+    if (!(level %in% train_col_values_mlr)) {
+      cat("col: ", col, ", level: ", level, "\n", sep = "")
+      cat("row: ", rownames(data_mlr_clean[data_mlr_clean[col] == level, ])[1], "\n", sep = "")
+      to_add <- append(rownames(data_mlr_clean[data_mlr_clean[col] == level, ])[1], to_add)
+    }
+  }
+}
+
+to_add
+
+cat("Rows to add to train data to ensure all levels are covered:", to_add, "\n")
+
+if (!is.null(to_add)) {
+  test_sample_mlr <- test_sample_mlr[!(test_sample_mlr %in% which(rownames(data_mlr_clean) %in% to_add))]
+}
+
+data_mlr_clean_train <- data_mlr_clean[-test_sample_mlr, ]
+data_mlr_clean_test <- data_mlr_clean[test_sample_mlr, ]
+data_mlr_clean_area_untransformed_train <- data_mlr_clean_area_untransformed[-test_sample_mlr]
+data_mlr_clean_area_untransformed_test <- data_mlr_clean_area_untransformed[test_sample_mlr]
+```
+
+### Multiple Linear Regression (without outlier/influential points)
+
+```{r}
+# Train model
+model_mlr_clean = lm(area ~ ., data = data_mlr_clean_train)
+
+# Get model summary
+summary(model_mlr_clean)
+
+# RMSE of model on training set
+mlr_clean_resids_transformed <- model_mlr_clean$residuals
+rmse_mlr_clean_transformed <- sqrt(mean(mlr_clean_resids_transformed^2))
+cat("RMSE (transformed):", rmse_mlr_clean_transformed, "\n")
+cat("RMSE transformed / mean(Area):", rmse_mlr_clean_transformed / mean(data_mlr_clean_train$area), "\n")
+
+# Back-transformed
+mlr_clean_resids_untransformed <- inverse_transform_mlr_area(model_mlr_clean$residuals)
+rmse_mlr_clean_untransformed <- sqrt(mean(mlr_clean_resids_untransformed^2))
+cat("RMSE (untransformed):", rmse_mlr_clean_untransformed, "\n")
+cat("RMSE untransformed / mean(Area):", rmse_mlr_clean_untransformed / mean(data_mlr_clean_area_untransformed_train), "\n")
+
+# rmse_mlr_clean = sqrt(mean(model_mlr_clean$residuals^2))
+# cat("RMSE:", rmse_mlr_clean, "\n")
+# cat("RMSE/mean(Area):", rmse_mlr_clean/mean(data_mlr_clean_train$area), "\n")
+
+# Use model for prediction on test set
+pred_mlr_clean <- predict(
+  model_mlr_clean,
+  newdata = data_mlr_clean_test
+)
+
+# Untransform predictions
+pred_mlr_clean_untransformed <- inverse_transform_mlr_area(pred_mlr_clean)
+
+# Compute MSE for predicted areas
+mse_mlr_clean_transformed <- mean((pred_mlr_clean - data_mlr_clean_test$area)^2)
+mse_mlr_clean_untransformed <- mean((pred_mlr_clean_untransformed - data_mlr_clean_area_untransformed_test)^2)
+cat("MSE (transformed):", mse_mlr_clean_transformed, "\n")
+cat("MSE (untransformed):", mse_mlr_clean_untransformed, "\n")
+```
+
+```{r}
+plot(model_mlr_clean)
+```
+
+### Model diagnostics
+
+#### Constant Variance (Homoskedasticity)
+
+```{r}
+bptest(model_mlr_clean)
+```
+
+The p value is greater than 0.05 and there we accept that this model has homoskedasicity. This is supported by the residual vs fitted plot below.
+
+#### Normality
+
+```{r}
+shapiro.test(residuals(model_mlr_clean))
+```
+since the p value greater than 0.05, we fail to reject the null hypothesis that the sample comes from a normal distribution. We can confirm from the QQ plot below that this is true
+
+## Shrinkage Methods
+
+We implement a few methods which shrink the number of predictors in the model. The purpose is to find the 'optimal point' between bias and variance (i.e prediction error).
+
+### PCR
+
+#### Handle outliers in continuous data
+
+First, we remove outliers from continuous variable columns. We (arbitrarily) define outliers as data which is more than 3SD away from the mean.
+
+```{r}
+outlier_rows = c()
+for (col in colnames(data_pcr)) {
+  if (!(col %in% factor_variables)) {
+    col_mean <- mean(data_pcr[, col])
+    col_sd <- sd(data_pcr[, col])
+    to_remove <- as.numeric(rownames(data_pcr[abs(data_pcr[, col] - col_mean) > 3 * col_sd, ]))
+    outlier_rows <- append(outlier_rows, to_remove)
+  }
+}
+
+cat("Outlier rows:", outlier_rows, "\n")
+
+data_pcr <- data_pcr[-outlier_rows, ]
+data_pcr_area_untransformed <- data_pcr_area_untransformed[-outlier_rows]
+
+# Re-level factor columns to ensure that levels correspond to actual values
+for (col in factor_variables) {
+  data_pcr[, col] <- droplevels(data_pcr[, col])
+}
+```
+
+#### Train/Test Split
+
+```{r}
+test_sample_pcr <- sample(1:nrow(data_pcr), floor(0.2 * nrow(data_pcr)))
+
+# Ensure that all levels exist in training set for factor variables
+to_add <- c()
+for (col in factor_variables) {
+  train_col_values_pcr <- unique(data_pcr[-test_sample_pcr, col])
+  for (level in levels(data_pcr[, col])) {
+    if (!(level %in% train_col_values_pcr)) {
+      cat("col: ", col, ", level: ", level, "\n", sep = "")
+      cat("row: ", rownames(data_pcr[data_pcr[col] == level, ])[1], "\n", sep = "")
+      to_add <- append(to_add, as.numeric(rownames(data_pcr[data_pcr[col] == level, ])[1]))
+    }
+  }
+}
+
+cat("Rows to move from test set to training set: ", to_add, "\n", sep = "")
+
+if (!is.null(to_add)) {
+  test_sample_pcr <- test_sample_pcr[!(test_sample_pcr %in% which(rownames(data_pcr) %in% to_add))]
+}
+
+data_pcr_train <- data_pcr[-test_sample_pcr, ]
+X_train_pcr <- data_pcr_train[, !(colnames(data_pcr_train) %in% c("area"))]
+Y_train_pcr <- data_pcr_train$area
+data_pcr_area_untransformed_train <- data_pcr_area_untransformed[-test_sample_pcr]
+
+data_pcr_test <- data_pcr[test_sample_pcr, ]
+X_test_pcr <- data_pcr_test[, !(colnames(data_pcr_test) %in% c("area"))]
+Y_test_pcr <- data_pcr_test$area
+data_pcr_area_untransformed_test <- data_pcr_area_untransformed[test_sample_pcr]
+```
+
+#### Principal Components Analysis
+
+First, we find the principal components of the continuous variables in this dataset. To do so, we get the percentage of variance explained by each principal component.
+
+```{r}
+X_train_pcr_continuous = X_train_pcr[, !(colnames(X_train_pcr) %in% factor_variables)]
+pca_res <- prcomp(
+  X_train_pcr_continuous,
+  scale = TRUE
+)
+pca_sd = pca_res$sdev
+var_explained <- pca_sd^2 / sum(pca_sd^2)
+round(var_explained, 4)
+```
+Next, we make a scree plot to visualize the elbow which will inform the number of principal components we choose to use in our model.
+
+```{r}
+plot(
+  c(1:length(var_explained)),
+  var_explained,
+  type = "b",
+  xlab = "Principal Component",
+  ylab = "Variance Explained",
+  main = "Scree Plot"
+)
+
+plot(
+  c(1:length(var_explained)),
+  cumsum(var_explained),
+  type = "b",
+  xlab = "Principal Component",
+  ylab = "Cumulative Variance Explained",
+  main = "Scree Plot (cumulative)"
+)
+```
+
+There is no obvious elbow in this scree plot; therefore, we will use the number of PCs which explains more than 90% of the variance.
+
+```{r}
+# Get scores of first few principal components
+n_comps <- which(cumsum(var_explained) >= 0.9)[1]
+
+X_train_pcr_pcs <- pca_res$x[, 1:n_comps]
+X_test_pcr_pcs <- predict(pca_res, newdata = X_test_pcr[, !(colnames(X_test_pcr) %in% factor_variables)])[, 1:n_comps]
+```
+
+#### Principal Component Regression
+
+With these Principal Components as the new regressors, we can again fit a linear model and try to predict the area.
+
+```{r}
+model_pcr_continuous <- lm(area~., data = as.data.frame(cbind(X_train_pcr_pcs, area = Y_train_pcr)))
+
+# Get model summary
+summary(model_pcr_continuous)
+
+# RMSE of model on training set
+rmse_pcr_continuous = sqrt(mean(model_pcr_continuous$residuals^2))
+cat("RMSE:", rmse_pcr_continuous, "\n")
+cat("RMSE/mean(Area):", rmse_pcr_continuous/mean(Y_train_pcr), "\n")
+
+# Use model for prediction on test set
+pred_pcr_continuous_transformed <- predict(
+  model_pcr_continuous,
+  newdata = as.data.frame(cbind(X_test_pcr_pcs, area = Y_test_pcr))
+)
+
+# Untransform predictions
+pred_pcr_continuous_untransformed <- inverse_transform_pcr_area(pred_pcr_continuous_transformed)
+
+# Compute MSE for predicted areas
+mse_pcr_continuous_transformed <- sqrt(mean((pred_pcr_continuous_transformed - Y_test_pcr)^2))
+cat("MSE (transformed):", mse_pcr_continuous_transformed, "\n")
+
+mse_pcr_continuous_untransformed <- sqrt(mean((pred_pcr_continuous_untransformed - data_pcr_area_untransformed_test)^2))
+cat("MSE (untransformed):", mse_pcr_continuous_untransformed, "\n")
+```
+
+We can also check if adding in the categorical variables (which we dropped earlier) will improve this model.
+
+```{r}
+# Train model
+model_pcr <- lm(
+  area~.,
+  data = as.data.frame(cbind(
+    X_train_pcr_pcs,
+    X_train_pcr[, colnames(X_train_pcr) %in% factor_variables],
+    area = Y_train_pcr
+  ))
+)
+
+# Get model summary
+summary(model_pcr)
+
+# RMSE of model on training set
+rmse_pcr = sqrt(mean(model_pcr$residuals^2))
+cat("RMSE:", rmse_pcr, "\n")
+cat("RMSE/mean(Area):", rmse_pcr/mean(Y_train_pcr), "\n")
+
+# Use model for prediction on test set
+pred_pcr_transformed <- predict(
+  model_pcr,
+  newdata = as.data.frame(cbind(
+    X_test_pcr_pcs,
+    X_test_pcr[, colnames(X_test_pcr) %in% factor_variables],
+    area = Y_test_pcr
+  ))
+)
+
+# Untransform predictions
+pred_pcr_untransformed <- inverse_transform_pcr_area(pred_pcr_transformed)
+
+# Compute MSE for predicted areas
+mse_pcr_transformed <- sqrt(mean((pred_pcr_transformed - Y_test_pcr)^2))
+cat("MSE (transformed):", mse_pcr_transformed, "\n")
+
+mse_pcr_untransformed <- sqrt(mean((pred_pcr_untransformed - data_pcr_area_untransformed_test)^2))
+cat("MSE (untransformed):", mse_pcr_untransformed, "\n")
+```
+
+## Ridge Regression
+
+```{r}
+
+X_train_mat <- data.matrix(X_train_pcr)
+X_test_mat <- data.matrix(X_test_pcr)
+
+Y_train <- Y_train_pcr
+Y_test <- Y_test_pcr
+```
+
+```{r}
+lambdas <- 10^seq(2, -3, by = -.1)
+ridge_reg = glmnet(X_train_mat, Y_train, nlambda = 25, alpha = 0, family = 'gaussian', lambda = lambdas)
+cv_ridge <- cv.glmnet(X_train_mat, Y_train, alpha = 0, lambda = lambdas)
+optimal_lambda <- cv_ridge$lambda.min
+cat("Optimal Lambda:", optimal_lambda, "\n")
+plot(cv_ridge)
+```
+```{r}
+# Predict using RR model
+pred_ridge_train <- predict(ridge_reg, s = optimal_lambda, newx = X_train_mat)
+
+# RMSE of model on training set
+rmse_ridge_train = sqrt(mean((pred_ridge_train - Y_train)^2))
+cat("RMSE:", rmse_ridge_train, "\n")
+cat("RMSE/mean(Area):", rmse_ridge_train / mean(Y_train), "\n")
+
+pred_ridge_train_untransformed = inverse_transform_pcr_area(pred_ridge_train)
+
+rmse_ridge_untransformed_train = sqrt(mean((pred_ridge_train_untransformed -  Y_train)^2))
+cat("RMSE:", rmse_ridge_untransformed_train, "\n")
+cat("RMSE/mean(Area) train untransformed:", rmse_ridge_untransformed_train / mean(Y_train), "\n")
+
+
+pred_ridge_test <- predict(ridge_reg, s = optimal_lambda, newx = X_test_mat)
+pred_ridge_test_untransformed <- inverse_transform_pcr_area(pred_ridge_test)
+
+rmse_ridge_transformed <- sqrt(mean(pred_ridge_test - Y_test)^2)
+cat("RMSE (transformed):", rmse_ridge_transformed, "\n")
+
+rmse_ridge_untransformed <- sqrt(mean((pred_ridge_test_untransformed -  Y_test)^2))
+cat("MSE (Untransformed):", rmse_ridge_untransformed, "\n")
+```
+
+## Lasso regression
+
+```{r}
+lambdas <- 10^seq(2, -3, by = -.1)
+lasso_reg = glmnet(X_train_mat, Y_train, nlambda = 25, alpha = 1, family = 'gaussian', lambda = lambdas)
+cv_lasso <- cv.glmnet(X_train_mat, Y_train, alpha = 0, lambda = lambdas)
+optimal_lambda <- cv_lasso$lambda.min
+cat("Optimal Lambda:", optimal_lambda, "\n")
+plot(cv_lasso)
+
+pred_lasso_train <- predict(lasso_reg, s = optimal_lambda, newx = X_train_mat)
+
+# RMSE of Lasso Regression model on training set
+rmse_lasso_train = sqrt(mean((pred_lasso_train - Y_train)^2))
+cat("RMSE:", rmse_lasso_train, "\n")
+cat("RMSE/mean(Area):", rmse_lasso_train/mean(Y_train), "\n")
+
+rmse_lasso_train_untransformed = inverse_transform_pcr_area(pred_lasso_train)
+
+rmse_lasso_train_untransformed = sqrt(mean((rmse_lasso_train_untransformed -  Y_train)^2))
+cat("RMSE:", rmse_lasso_train_untransformed, "\n")
+cat("RMSE/mean(Area) train untransformed:", rmse_lasso_train_untransformed / mean(Y_train), "\n")
+
+pred_lasso_test <- predict(lasso_reg, s = optimal_lambda, newx = X_test_mat)
+pred_lasso_test_untransformed <- inverse_transform_pcr_area(pred_lasso_test)
+
+rmse_lasso_test_transformed <- sqrt(mean(pred_lasso_test - Y_test)^2)
+cat("RMSE (Transformed):", rmse_lasso_test_transformed, "\n")
+
+rmse_lasso_test_untransformed <- sqrt(mean((pred_lasso_test_untransformed -  Y_test)^2))
+cat("RMSE (Untransformed):", rmse_lasso_test_untransformed, "\n")
+```
+
+
+# Ensemble Method
+
+Finally, we note that there is a large proportion of the data which has `area` $0$. Therefore, it might make sense to first perform a binary classification of the data into zero and nonzero area, following which we could run one of the models above to predict `area` for the predicted nonzero bin of data.
+
+## Data
+
+```{r}
+# Define data for ensemble Method
+data_ensemble <- data
+
+# Binary classifier for area = 0 and area > 0
+data_ensemble[data_ensemble$area == 0, "area_classifier"] = 0
+data_ensemble[data_ensemble$area != 0, "area_classifier"] = 1
+
+# Apply different transformations to area for the two models
+data_ensemble$area <- log(1.0 + data$area)
+
+# Define functions to invert the transforms applied to area
+inverse_transform_ensemble_area <- function(output) {
+  return(exp(output) - 1.0)
+}
+
+# Maintain copies of original area separately for testing
+data_ensemble_area_untransformed <- data$area
+
+# Remove NA values
+non_na_data_ensemble <- complete.cases(data_ensemble)
+data_ensemble <- data_ensemble[non_na_data_ensemble, ]
+data_ensemble_area_untransformed <- data_ensemble_area_untransformed[non_na_data_ensemble]
+
+# Remove inf values
+finite_data_ensemble <- unname(is.finite(rowSums(data_ensemble[, !(colnames(data_ensemble) %in% factor_variables)])))
+data_ensemble <- data_ensemble[finite_data_ensemble, ]
+data_ensemble_area_untransformed <- data_ensemble_area_untransformed[finite_data_ensemble]
+```
+
+## Handle Outliers
+
+```{r}
+outlier_rows = c()
+for (col in colnames(data_ensemble)) {
+  if (!(col %in% factor_variables)) {
+    col_mean <- mean(data_ensemble[, col])
+    col_sd <- sd(data_ensemble[, col])
+    to_remove <- as.numeric(rownames(data_ensemble[abs(data_ensemble[, col] - col_mean) > 3 * col_sd, ]))
+    outlier_rows <- append(outlier_rows, to_remove)
+  }
+}
+
+cat("Outlier rows:", outlier_rows, "\n")
+
+data_ensemble <- data_ensemble[-outlier_rows, ]
+data_ensemble_area_untransformed <- data_ensemble_area_untransformed[-outlier_rows]
+
+# Re-level factor columns to ensure that levels correspond to actual values
+for (col in factor_variables) {
+  data_ensemble[, col] <- droplevels(data_ensemble[, col])
+}
+
+```
+
+## Train/Test Split
+
+```{r}
+test_sample_ensemble <- sample(1:nrow(data_ensemble), floor(0.2 * nrow(data_ensemble)))
+
+# Ensure all levels for factor variables exist in training set 
+to_add <- c()
+for (col in factor_variables) {
+  train_col_values_ensemble <- unique(data_ensemble[-test_sample_ensemble, col])
+  for (level in levels(data_ensemble[, col])) {
+    if (!(level %in% train_col_values_ensemble)) {
+      cat("col: ", col, ", level: ", level, "\n", sep = "")
+      cat("row: ", rownames(data_ensemble[data_ensemble[col] == level, ])[1], "\n", sep = "")
+      to_add <- append(rownames(data_ensemble[data_ensemble[col] == level, ])[1], to_add)
+    }
+  }
+}
+
+to_add
+
+cat("Rows to add to train data to ensure all levels are covered:", to_add, "\n")
+
+if (!is.null(to_add)) {
+  test_sample_ensemble <- test_sample_ensemble[!(test_sample_ensemble %in% which(rownames(data_ensemble) %in% to_add))]
+}
+
+data_ensemble_train <- data_ensemble[-test_sample_ensemble, ]
+data_ensemble_test <- data_ensemble[test_sample_ensemble, ]
+data_ensemble_area_untransformed_train <- data_ensemble_area_untransformed[-test_sample_ensemble]
+data_ensemble_area_untransformed_test <- data_ensemble_area_untransformed[test_sample_ensemble]
+```
+
+## Ensemble Model - Evaluation
+
+```{r}
+# Build logistic regression model
+model_lr <- glm(
+  area_classifier ~ .,
+  family = binomial,
+  data = data_ensemble_train[, !(colnames(data_ensemble_train) %in% c("area"))]
+)
+
+# LR Model summary
+summary(model_lr)
+
+# Predictions based on probability on train set
+data_ensemble_train[, "pred_binary"] <- ifelse(model_lr$fitted.values > 0.5, 1, 0)
+
+# Confusion Matrix
+mytable <- table(data_ensemble_train$area_classifier, data_ensemble_train$pred_binary)
+rownames(mytable) <- c("Obs. 0","Obs. 1")
+colnames(mytable) <- c("Pred. 0","Pred. 1")
+cat("Confusion Matrix (Training Data)\n")
+mytable
+cat("\n")
+
+# Efficiency of LR Model
+efficiency <- sum(diag(mytable))/sum(mytable)
+cat("Efficiency (logistic regression binary classifier, Training Data):", efficiency, "\n")
+
+# Area Under ROC Curve
+cat("AUC (binary classifier, training data):", auc(area_classifier ~ model_lr$fitted.values, data = data_ensemble_train), "\n")
+
+# Lasso Model Data (area classified as 1 in training set)
+data_lasso_train <- data_ensemble_train[data_ensemble_train$pred_binary == 1, ]
+X_train_lasso <- data.matrix(data_lasso_train[, !(colnames(data_lasso_train) %in% c(
+  "area",
+  "area_classifier",
+  "pred_binary"
+))])
+Y_train_lasso <- data_lasso_train$area
+
+lambdas <- 10^seq(2, -3, by = -.1)
+lasso_reg = glmnet(
+  X_train_lasso,
+  Y_train_lasso,
+  nlambda = 25,
+  alpha = 1,
+  family = 'gaussian',
+  lambda = lambdas
+)
+cv_lasso <- cv.glmnet(X_train_lasso, Y_train_lasso, alpha = 0, lambda = lambdas)
+optimal_lambda <- cv_lasso$lambda.min
+cat("Optimal Lambda:", optimal_lambda, "\n")
+
+# Prediction and evaluation on train data
+predictions_train <- predict(lasso_reg, s = optimal_lambda, newx = X_train_lasso)
+rmse_lasso_ensemble_train <- sqrt(mean(predictions_train - Y_train_lasso)^2)
+cat("RMSE (lasso, training data):", rmse_lasso_ensemble_train, "\n")
+
+# Cumulative prediction on training data
+data_ensemble_train[, "pred"] <- ifelse(
+  data_ensemble_train$pred_binary == 0,
+  0,
+  predictions_train
+)
+
+# Area (transformed) statistics
+rmse_ensemble_train_transformed <- sqrt(mean((data_ensemble_train$pred - data_ensemble_train$area)^2))
+
+# Area (untransformed) statistics
+pred_train_untransformed <- inverse_transform_ensemble_area(data_ensemble_train$pred)
+rmse_ensemble_train_untransformed <- sqrt(mean((pred_train_untransformed - data_ensemble_area_untransformed_train)^2))
+
+cat("RMSE (transformed):", rmse_ensemble_train_transformed)
+cat("RMSE (untransformed):", rmse_ensemble_train_untransformed)
+
+# Predictions on test data
+
+# Binary Classifier
+pred_lr <- predict(
+  model_lr,
+  newdata = data_ensemble_test[, !(colnames(data_ensemble_test) %in% c("area"))]
+)
+
+data_ensemble_test[, "pred_binary"] = ifelse(pred_lr < 0.5, 0, 1)
+
+mytable <- table(data_ensemble_test$area_classifier, data_ensemble_test$pred_binary)
+rownames(mytable) <- c("Obs. 0","Obs. 1")
+colnames(mytable) <- c("Pred. 0","Pred. 1")
+cat("Confusion Matrix (Test Data)\n")
+mytable
+cat("\n")
+
+efficiency <- sum(diag(mytable))/sum(mytable)
+cat("Efficiency (logistic regression binary classifier, Training Data):", efficiency, "\n")
+
+# Prediction and evaluation on test data
+pred_lasso_test <- predict(
+  lasso_reg,
+  s = optimal_lambda,
+  newx = data.matrix(data_ensemble_test[
+    data_ensemble_test$pred_binary == 1,
+    !(colnames(data_ensemble_test) %in% c(
+      "area",
+      "area_classifier",
+      "pred_binary"
+    ))
+  ])
+)
+
+rmse_lasso_ensemble_test <- sqrt(mean((pred_lasso_test - data_ensemble_test[data_ensemble_test$pred_binary == 1, "area"])^2))
+
+# Cumulative prediction on training data
+data_ensemble_test[, "pred"] <- ifelse(
+  data_ensemble_test$pred_binary == 0,
+  0,
+  pred_lasso_test
+)
+
+# Area (transformed) statistics
+rmse_ensemble_test_transformed <- sqrt(mean((data_ensemble_test$pred - data_ensemble_test$area)^2))
+
+# Area (untransformed) statistics
+pred_test_untransformed <- inverse_transform_ensemble_area(data_ensemble_test$pred)
+rmse_ensemble_test_untransformed <- sqrt(mean((pred_test_untransformed - data_ensemble_area_untransformed_test)^2))
+
+cat("RMSE ensemble (transformed, test data):", rmse_ensemble_test_transformed, "\n")
+cat("RMSE ensemble (untransformed, test data):", rmse_ensemble_test_untransformed, "\n")
+```
+
